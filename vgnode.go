@@ -1,19 +1,5 @@
 package vugu
 
-import (
-	"bytes"
-	"encoding/binary"
-	"fmt"
-	"sort"
-
-	"github.com/cespare/xxhash"
-
-	// FIXME: see if we can clean it up programs which only use VGNode at run time (i.e in wasm)
-	// will not end up bundling this library for no reason - means the init() below needs to be cleaned up
-	// and probably have cruftBody be a function using once.Do - only needed if something calls it.
-	"golang.org/x/net/html"
-)
-
 // Things to sort out:
 // * vg-if, vg-range, etc (JUST COPIED FROM ATTRS, EVALUATED LATER)
 // * :whatever syntax (ALSO JUST COPIED FROM ATTRS, EVALUATED LATER)
@@ -25,67 +11,73 @@ import (
 
 // VDom states: Just one, after being converted from html.Node
 
-// VGNodeType is one of the valid node types (error, text, docuemnt, element, comment, doctype).
+// VGNodeType is one of the valid node types (error, text, document, element, comment, doctype).
 // Note that only text, element and comment are currently used.
 type VGNodeType uint32
 
 // Available VGNodeTypes.
 const (
-	ErrorNode    = VGNodeType(html.ErrorNode)
-	TextNode     = VGNodeType(html.TextNode)
-	DocumentNode = VGNodeType(html.DocumentNode)
-	ElementNode  = VGNodeType(html.ElementNode)
-	CommentNode  = VGNodeType(html.CommentNode)
-	DoctypeNode  = VGNodeType(html.DoctypeNode)
+	ErrorNode    = VGNodeType(0 /*html.ErrorNode*/)
+	TextNode     = VGNodeType(1 /*html.TextNode*/)
+	DocumentNode = VGNodeType(2 /*html.DocumentNode*/)
+	ElementNode  = VGNodeType(3 /*html.ElementNode*/)
+	CommentNode  = VGNodeType(4 /*html.CommentNode*/)
+	DoctypeNode  = VGNodeType(5 /*html.DoctypeNode*/)
 )
 
 // VGAtom is an integer corresponding to golang.org/x/net/html/atom.Atom.
 // Note that this may be removed for simplicity and to remove the dependency
 // on the package above.  Suggest you don't use it.
-type VGAtom uint32
+// type VGAtom uint32
 
 // VGAttribute is the attribute on an HTML tag.
 type VGAttribute struct {
 	Namespace, Key, Val string
 }
 
-func attrFromHtml(attr html.Attribute) VGAttribute {
-	return VGAttribute{
-		Namespace: attr.Namespace,
-		Key:       attr.Key,
-		Val:       attr.Val,
-	}
+// VGProperty is a JS property to be set on a DOM element.
+type VGProperty struct {
+	Key     string
+	JSONVal []byte // value as JSON expression
 }
 
 // VGNode represents a node from our virtual DOM with the dynamic parts wired up into functions.
 type VGNode struct {
 	Parent, FirstChild, LastChild, PrevSibling, NextSibling *VGNode
 
-	Type      VGNodeType
-	DataAtom  VGAtom
+	Type VGNodeType
+	// DataAtom  VGAtom // this needed to come out, we're not using it and without well-defined behavior it just becomes confusing and problematic
 	Data      string
 	Namespace string
 	Attr      []VGAttribute
 
-	Props Props // dynamic attributes, used as input for components or converted to attributes for regular HTML elements
+	// JS properties to e set during render
+	Prop []VGProperty
 
-	InnerHTML string // indicates that children should be ignored and this raw HTML is the children of this tag
+	// Props Props // dynamic attributes, used as input for components or converted to attributes for regular HTML elements
 
-	DOMEventHandlers map[string]DOMEventHandler // describes invocations when DOM events happen
+	InnerHTML *string // indicates that children should be ignored and this raw HTML is the children of this tag; nil means not set, empty string means explicitly set to empty string
+
+	// DOMEventHandlers map[string]DOMEventHandler // describes invocations when DOM events happen
+
+	DOMEventHandlerSpecList []DOMEventHandlerSpec // replacing DOMEventHandlers
+
+	// indicates this node's output should be delegated to the specified component
+	Component interface{}
 
 	// default of 0 means it will be calculated when positionHash() is called
-	positionHashVal uint64
+	// positionHashVal uint64
 }
 
-// SetDOMEventHandler will assign a named event to DOMEventHandlers (will allocate the map if nil).
-// Used during VDOM construction and during render to determine browser events to hook up.
-func (n *VGNode) SetDOMEventHandler(name string, h DOMEventHandler) {
-	if n.DOMEventHandlers == nil {
-		n.DOMEventHandlers = map[string]DOMEventHandler{name: h}
-		return
-	}
-	n.DOMEventHandlers[name] = h
-}
+// // SetDOMEventHandler will assign a named event to DOMEventHandlers (will allocate the map if nil).
+// // Used during VDOM construction and during render to determine browser events to hook up.
+// func (n *VGNode) SetDOMEventHandler(name string, h DOMEventHandler) {
+// 	if n.DOMEventHandlers == nil {
+// 		n.DOMEventHandlers = map[string]DOMEventHandler{name: h}
+// 		return
+// 	}
+// 	n.DOMEventHandlers[name] = h
+// }
 
 // InsertBefore inserts newChild as a child of n, immediately before oldChild
 // in the sequence of n's children. oldChild may be nil, in which case newChild
@@ -189,148 +181,148 @@ func (vgn *VGNode) Walk(f func(*VGNode) error) error {
 	return nil
 }
 
-// positionHash calculates a hash based on position in the tree only (specifically it does not consider element attributes),
-// stores the result in positionHashVal and returns it.
-// The same element position will have the same hash, regardless of element contents.  Each unique position in the vdom should have
-// a unique positionHash value, allowing for the usual hash collision caveat.
-// (subsequent calls return positionHashVal).  Special case: root nodes (Parent==nil) always return 0.
-// This is used to efficiently answer the question "is this vdom element structurally in the same position as ...".
-func (vgn *VGNode) positionHash() uint64 {
+// // positionHash calculates a hash based on position in the tree only (specifically it does not consider element attributes),
+// // stores the result in positionHashVal and returns it.
+// // The same element position will have the same hash, regardless of element contents.  Each unique position in the vdom should have
+// // a unique positionHash value, allowing for the usual hash collision caveat.
+// // (subsequent calls return positionHashVal).  Special case: root nodes (Parent==nil) always return 0.
+// // This is used to efficiently answer the question "is this vdom element structurally in the same position as ...".
+// func (vgn *VGNode) positionHash() uint64 {
 
-	if vgn.positionHashVal != 0 {
-		return vgn.positionHashVal
-	}
+// 	if vgn.positionHashVal != 0 {
+// 		return vgn.positionHashVal
+// 	}
 
-	// root element always returns 0
-	if vgn.Parent == nil {
-		return 0
-	}
+// 	// root element always returns 0
+// 	if vgn.Parent == nil {
+// 		return 0
+// 	}
 
-	b8 := make([]byte, 8)
+// 	b8 := make([]byte, 8)
 
-	h := xxhash.New()
+// 	h := xxhash.New()
 
-	// hash in parent's positionHash
-	binary.BigEndian.PutUint64(b8, vgn.Parent.positionHash())
-	h.Write(b8)
+// 	// hash in parent's positionHash
+// 	binary.BigEndian.PutUint64(b8, vgn.Parent.positionHash())
+// 	h.Write(b8)
 
-	// calculate our sibling depth
-	var n uint64
-	for prev := vgn.PrevSibling; prev != nil; prev = prev.PrevSibling {
-		n++
-	}
+// 	// calculate our sibling depth
+// 	var n uint64
+// 	for prev := vgn.PrevSibling; prev != nil; prev = prev.PrevSibling {
+// 		n++
+// 	}
 
-	// hash in sibling depth
-	binary.BigEndian.PutUint64(b8, n)
-	h.Write(b8)
+// 	// hash in sibling depth
+// 	binary.BigEndian.PutUint64(b8, n)
+// 	h.Write(b8)
 
-	// that's it
-	vgn.positionHashVal = h.Sum64()
-	return vgn.positionHashVal
-}
+// 	// that's it
+// 	vgn.positionHashVal = h.Sum64()
+// 	return vgn.positionHashVal
+// }
 
-// elementHash calculates and returns a hash of just the contents of this element - it's type, Data, Attrs and Props and InnerHTML,
-// it specifically does not include element position data like any of the Parent, NextSibling, etc pointers.
-// The same element at different positions in the tree, assuming the same start param, will result in the same hash.
-// FIXME: will need to add events here.
-// The return value is not cached, it is calculated newly each time.
-// A starting point to be hashed in can be provided also if needed, otherwise pass 0.
-func (vgn *VGNode) elementHash(start uint64) uint64 {
+// // elementHash calculates and returns a hash of just the contents of this element - it's type, Data, Attrs and Props and InnerHTML,
+// // it specifically does not include element position data like any of the Parent, NextSibling, etc pointers.
+// // The same element at different positions in the tree, assuming the same start param, will result in the same hash.
+// // FIXME: will need to add events here.
+// // The return value is not cached, it is calculated newly each time.
+// // A starting point to be hashed in can be provided also if needed, otherwise pass 0.
+// func (vgn *VGNode) elementHash(start uint64) uint64 {
 
-	b8 := make([]byte, 8)
+// 	b8 := make([]byte, 8)
 
-	h := xxhash.New()
+// 	h := xxhash.New()
 
-	if start != 0 {
-		binary.BigEndian.PutUint64(b8, start)
-		h.Write(b8)
-	}
+// 	if start != 0 {
+// 		binary.BigEndian.PutUint64(b8, start)
+// 		h.Write(b8)
+// 	}
 
-	// type (element, text, comment)
-	binary.BigEndian.PutUint64(b8, uint64(vgn.Type))
-	h.Write(b8)
+// 	// type (element, text, comment)
+// 	binary.BigEndian.PutUint64(b8, uint64(vgn.Type))
+// 	h.Write(b8)
 
-	// name of the element or text content
-	fmt.Fprint(h, vgn.Data)
+// 	// name of the element or text content
+// 	fmt.Fprint(h, vgn.Data)
 
-	// hash static attrs
-	for _, a := range vgn.Attr {
-		fmt.Fprint(h, a.Key)
-		fmt.Fprint(h, a.Val)
-	}
+// 	// hash static attrs
+// 	for _, a := range vgn.Attr {
+// 		fmt.Fprint(h, a.Key)
+// 		fmt.Fprint(h, a.Val)
+// 	}
 
-	// hash props (dynamic attrs)
-	pks := vgn.Props.OrderedKeys() // stable sequence
-	for _, pk := range pks {
-		fmt.Fprint(h, pk) // key goes in as string
+// 	// // hash props (dynamic attrs)
+// 	// pks := vgn.Props.OrderedKeys() // stable sequence
+// 	// for _, pk := range pks {
+// 	// 	fmt.Fprint(h, pk) // key goes in as string
 
-		// use ComputeHash on the value because we don't know it's type
-		vh := ComputeHash(vgn.Props[pk])
-		binary.BigEndian.PutUint64(b8, vh)
-		h.Write(b8)
-	}
+// 	// 	// use ComputeHash on the value because we don't know it's type
+// 	// 	vh := ComputeHash(vgn.Props[pk])
+// 	// 	binary.BigEndian.PutUint64(b8, vh)
+// 	// 	h.Write(b8)
+// 	// }
 
-	// hash events
-	if len(vgn.DOMEventHandlers) > 0 {
-		keys := make([]string, len(vgn.DOMEventHandlers))
-		for k := range vgn.DOMEventHandlers {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			vh := vgn.DOMEventHandlers[k].hash()
-			binary.BigEndian.PutUint64(b8, vh)
-			h.Write(b8)
-		}
-	}
+// 	// hash events
+// 	if len(vgn.DOMEventHandlers) > 0 {
+// 		keys := make([]string, len(vgn.DOMEventHandlers))
+// 		for k := range vgn.DOMEventHandlers {
+// 			keys = append(keys, k)
+// 		}
+// 		sort.Strings(keys)
+// 		for _, k := range keys {
+// 			vh := vgn.DOMEventHandlers[k].hash()
+// 			binary.BigEndian.PutUint64(b8, vh)
+// 			h.Write(b8)
+// 		}
+// 	}
 
-	// innerHTML if any
-	if vgn.InnerHTML != "" {
-		fmt.Fprint(h, vgn.InnerHTML)
-	}
+// 	// innerHTML if any
+// 	if vgn.InnerHTML != nil {
+// 		fmt.Fprint(h, *vgn.InnerHTML)
+// 	}
 
-	return h.Sum64()
-}
+// 	return h.Sum64()
+// }
 
-var cruftHtml *html.Node
-var cruftBody *html.Node
+// var cruftHtml *html.Node
+// var cruftBody *html.Node
 
-func init() {
+// func init() {
 
-	// startTime := time.Now()
-	// defer func() { log.Printf("init() took %v", time.Since(startTime)) }() // NOTE: 35us on my laptop
+// 	// startTime := time.Now()
+// 	// defer func() { log.Printf("init() took %v", time.Since(startTime)) }() // NOTE: 35us on my laptop
 
-	n, err := html.Parse(bytes.NewReader([]byte(`<html><body></body></html>`)))
-	if err != nil {
-		panic(err)
-	}
-	cruftHtml = n
+// 	n, err := html.Parse(bytes.NewReader([]byte(`<html><body></body></html>`)))
+// 	if err != nil {
+// 		panic(err)
+// 	}
+// 	cruftHtml = n
 
-	// find the body tag and store in cruftBody
-	var walk func(n *html.Node)
-	walk = func(n *html.Node) {
+// 	// find the body tag and store in cruftBody
+// 	var walk func(n *html.Node)
+// 	walk = func(n *html.Node) {
 
-		// log.Printf("walk: %#v", n)
+// 		// log.Printf("walk: %#v", n)
 
-		if n == nil {
-			return
-		}
+// 		if n == nil {
+// 			return
+// 		}
 
-		if n.Type == html.ElementNode && n.Data == "body" {
-			cruftBody = n
-			return
-		}
+// 		if n.Type == html.ElementNode && n.Data == "body" {
+// 			cruftBody = n
+// 			return
+// 		}
 
-		if n.FirstChild != nil {
-			walk(n.FirstChild)
-		}
-		if n.NextSibling != nil {
-			walk(n.NextSibling)
-		}
-	}
-	walk(cruftHtml)
+// 		if n.FirstChild != nil {
+// 			walk(n.FirstChild)
+// 		}
+// 		if n.NextSibling != nil {
+// 			walk(n.NextSibling)
+// 		}
+// 	}
+// 	walk(cruftHtml)
 
-	if cruftBody == nil {
-		panic("unable to find <body> tag in html, something went terribly wrong")
-	}
-}
+// 	if cruftBody == nil {
+// 		panic("unable to find <body> tag in html, something went terribly wrong")
+// 	}
+// }
